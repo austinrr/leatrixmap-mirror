@@ -1,1 +1,141 @@
+# A workflow that checkes the most recent LeatrixMaps-classic release on CurseForge that 
+# is different than the LeatrixMaps-classic verion included in this repo's release artifacts.
+# If the release is different it will download the one from CurseForge, generate a new release.json file
+# and package those assets together in a new release using the verion number as the tag and release name.
+#
+# The reason for all of this is because LeatrixMaps-classic is not hosted on a public repo nor does it have a relase.json
 
+name: Check and Package
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  # Triggers on a cron schedule that runs at 5 past every 2 hours.
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+        - cron: "5 */2 * * *"
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  # Collect info from previous release & get file name of most recent release on CurseForge
+  collect-version-information:
+    name: Collect Information
+    runs-on: ubuntu-latest
+
+    outputs:
+      MY_FILENAME: ${{ steps.set-envvar-prev-release.outputs.prev-release-filename }}
+      CURSE_FILENAME: ${{ steps.curl-curseforge.outputs.latest_curse_filename }}
+      CURSE_FILEID: ${{ steps.curl-curseforge.outputs.latest_curse_fileid }}
+        
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v3
+
+      # An action that will pull the release.json asset from the previous release into the working directory as 'previous-release.json'
+      - name: Get Previous Release JSON Asset
+        uses: robinraju/release-downloader@v1.9
+        with:
+          latest: true
+          filename: release.json
+          out-file-path: "previous-release"
+
+      - name: Set Env Var for Previous Release
+        id: set-envvar-prev-release
+        run: |
+          echo "prev-release-filename=$( \
+          cat previous-release/release.json | \
+          jq -r '.releases[0].filename' | \
+          sed 's/\.zip//')" >> "$GITHUB_OUTPUT"
+        
+      - name: cUrl Curseforge
+        id: curl-curseforge
+        run: |
+          curl -G 'https://www.curseforge.com/api/v1/mods/324034/files' \
+            -H 'Accept: application/json' \
+            -H 'Cache-Control: no-cache' \
+            --data-urlencode 'pageIndex=0' \
+            --data-urlencode 'pageSize=10' \
+            --data-urlencode 'sort=dateCreated' \
+            --data-urlencode 'sortDescending=true' \
+            --data-urlencode 'gameFlavorId=67408' \
+            --data-urlencode 'removeAlphas=true' \
+            -o curse-response.json
+          fileNameRaw=$(cat curse-response.json | jq -r '.data[0].fileName')
+          fileNameFixed=${fileNameRaw%.*}
+          echo "latest_curse_fileid=$(cat curse-response.json | jq -r '.data[0].id')" >> "$GITHUB_OUTPUT"
+          echo "latest_curse_filename=${fileNameFixed}" >> "$GITHUB_OUTPUT"
+
+  # Download Job
+  download-newer-version:
+    name: Download from CurseForge
+    needs: collect-version-information
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    env:
+      MY_FILENAME: ${{ needs.collect-version-information.outputs.MY_FILENAME }}
+      CURSE_FILENAME: ${{ needs.collect-version-information.outputs.CURSE_FILENAME }}
+      CURSE_FILEID: ${{ needs.collect-version-information.outputs.CURSE_FILEID }}
+      
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v3
+      
+      - name: Print Troubleshooting Info
+        run: |
+          echo "MY_FILENAME: $MY_FILENAME"
+          echo "CURSE_FILENAME: $CURSE_FILENAME"
+          echo "CURSE_FILEID: $CURSE_FILEID"
+          echo "The following steps should be 'skipped' if 'MY_FILENAME' == 'CURSE_FILENAME'"
+    
+      - name: Download Newer Version from Curse
+        id: donwload-newer-version
+        if: ${{ env.MY_FILENAME != env.CURSE_FILENAME }}
+        run: |
+          echo "New version detected! $CURSE_FILENAME"
+          curl -O https://mediafilez.forgecdn.net/files/${CURSE_FILEID:0:4}/${CURSE_FILEID:4:3}/${CURSE_FILENAME}.zip
+      
+      - name: Unzip Addon Package
+        id: unzip_addon_pkg
+        if: ${{ env.MY_FILENAME != env.CURSE_FILENAME }}
+        run: unzip ${CURSE_FILENAME}.zip
+
+      - name: Get Interface Version Number
+        id: get_interface_version_num
+        if: ${{ env.MY_FILENAME != env.CURSE_FILENAME }}
+        run: |
+          cd Leatrix_Maps/
+          echo "get_interface_version_num=$(cat Leatrix_Maps.toc | sed -n -E -e 's/^## Interface: ([0-9]+).*/\1/p')" >> "$GITHUB_OUTPUT"
+
+      - name: Update release.json
+        if: ${{ env.MY_FILENAME != env.CURSE_FILENAME }}
+        env:
+          NEW_INTERFACE: ${{ steps.get_interface_version_num.outputs.get_interface_version_num }}
+        run: |
+          FULLFILE_NAME="${CURSE_FILENAME}.zip"
+          temp="$(\
+            jq --arg FILENAME "$FULLFILE_NAME" --argjson INTERFACE "$NEW_INTERFACE" \
+            '.releases[0].filename |= $FILENAME | .releases[0].metadata[0].interface |= $INTERFACE' release.json)" \
+            && echo "${temp}" > release.json
+
+      - name: Make Tag
+        if: ${{ env.MY_FILENAME != env.CURSE_FILENAME }}
+        id: make-tag
+        run: |
+          version=$(echo $CURSE_FILENAME | sed 's/.*-\(.*\)-.*/\1/')
+          echo "tag=${version}-classic" >> "$GITHUB_OUTPUT"
+        
+      - name: Make Release
+        if: ${{ env.MY_FILENAME != env.CURSE_FILENAME }}
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "${{ env.CURSE_FILENAME }}.zip,release.json"
+          tag: ${{ steps.make-tag.outputs.tag }}
+          latest: true
+          
