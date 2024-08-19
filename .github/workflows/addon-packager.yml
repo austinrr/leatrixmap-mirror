@@ -98,8 +98,10 @@ jobs:
         id: donwload-newer-version
         if: ${{ env.MY_FILENAME != env.CURSE_FILENAME }}
         run: |
+          nozero=$(echo ${CURSE_FILEID:4:3} | sed 's/^0*//')
           echo "New version detected! $CURSE_FILENAME"
-          curl -O https://mediafilez.forgecdn.net/files/${CURSE_FILEID:0:4}/${CURSE_FILEID:4:3}/${CURSE_FILENAME}.zip
+          echo "DL URL: https://mediafilez.forgecdn.net/files/${CURSE_FILEID:0:4}/${nozero}/${CURSE_FILENAME}.zip"
+          curl -O https://mediafilez.forgecdn.net/files/${CURSE_FILEID:0:4}/${nozero}/${CURSE_FILENAME}.zip
       
       - name: Unzip Addon Package
         id: unzip_addon_pkg
